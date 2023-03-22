@@ -14,6 +14,7 @@ import (
 	"time"
 
 	metrics "github.com/armon/go-metrics"
+	"github.com/dustin/go-humanize"
 	consulapi "github.com/hashicorp/consul/api"
 	log "github.com/hashicorp/go-hclog"
 	uuidparse "github.com/hashicorp/go-uuid"
@@ -26,6 +27,7 @@ import (
 	"github.com/hashicorp/nomad/helper/bufconndialer"
 	"github.com/hashicorp/nomad/helper/escapingfs"
 	"github.com/hashicorp/nomad/helper/pluginutils/loader"
+	"github.com/hashicorp/nomad/helper/pointer"
 	"github.com/hashicorp/nomad/helper/uuid"
 	"github.com/hashicorp/nomad/lib/cpuset"
 	"github.com/hashicorp/nomad/nomad"
@@ -570,6 +572,16 @@ func convertServerConfig(agentConfig *Config) (*nomad.Config, error) {
 	if bolt := agentConfig.Server.RaftBoltConfig; bolt != nil {
 		conf.RaftBoltNoFreelistSync = bolt.NoFreelistSync
 	}
+
+	// Interpret max_job_source_size as bytes from string value
+	if agentConfig.Server.MaxJobSourceSize == nil {
+		agentConfig.Server.MaxJobSourceSize = pointer.Of("1m")
+	}
+	maxJobSourceBytes, err := humanize.ParseBytes(*agentConfig.Server.MaxJobSourceSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse max job source bytes: %w", err)
+	}
+	conf.MaxJobSourceSize = int(maxJobSourceBytes)
 
 	return conf, nil
 }

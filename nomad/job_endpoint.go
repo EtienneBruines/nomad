@@ -15,7 +15,6 @@ import (
 	"github.com/hashicorp/go-memdb"
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-set"
-
 	"github.com/hashicorp/nomad/acl"
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/pointer"
@@ -24,6 +23,7 @@ import (
 	"github.com/hashicorp/nomad/nomad/state/paginator"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/scheduler"
+	"github.com/shoenig/netlog"
 )
 
 const (
@@ -98,6 +98,8 @@ func (j *Job) Register(args *structs.JobRegisterRequest, reply *structs.JobRegis
 	if args.Job == nil {
 		return fmt.Errorf("missing job for registration")
 	}
+
+	// netlog.Cyan("Job.Register", "flags", args.Submission.VariableFlags, "job size", len(args.Submission.Source))
 
 	// defensive check; http layer and RPC requester should ensure namespaces are set consistently
 	if args.RequestNamespace() != args.Job.Namespace {
@@ -829,6 +831,8 @@ func (j *Job) Deregister(args *structs.JobDeregisterRequest, reply *structs.JobD
 		return structs.ErrPermissionDenied
 	}
 
+	netlog.Purple("Job.Deregister", "args.JobID", args.JobID, "args.Namespace", args.Namespace)
+
 	// Validate the arguments
 	if args.JobID == "" {
 		return fmt.Errorf("missing job ID for deregistering")
@@ -840,11 +844,13 @@ func (j *Job) Deregister(args *structs.JobDeregisterRequest, reply *structs.JobD
 		return err
 	}
 	ws := memdb.NewWatchSet()
+	netlog.Purple("Job.Deregister", "looking up", "request namespace", args.RequestNamespace(), "args.JobID", args.JobID)
 	job, err := snap.JobByID(ws, args.RequestNamespace(), args.JobID)
 	if err != nil {
 		return err
 	}
 	if job == nil {
+		netlog.Purple("Job.Deregister", "job is nil", "1")
 		return nil
 	}
 
@@ -1181,6 +1187,53 @@ func (j *Job) Scale(args *structs.JobScaleRequest, reply *structs.JobRegisterRes
 	j.srv.setQueryMeta(&reply.QueryMeta)
 
 	return nil
+}
+
+func (j *Job) GetJobSubmission(args *structs.JobSubmissionRequest, reply *structs.JobSubmissionResponse) error {
+	authErr := j.srv.Authenticate(j.ctx, args)
+	if done, err := j.srv.forward("Job.GetJobSubmission", args, args, reply); done {
+		return err
+	}
+	j.srv.MeasureRPCRate("job_submission", structs.RateMetricRead, args)
+	if authErr != nil {
+		return structs.ErrPermissionDenied
+	}
+	defer metrics.MeasureSince([]string{"nomad", "job", "get_job_submission"}, time.Now())
+
+	// Check for read-job permissions
+	if aclObj, err := j.srv.ResolveACL(args); err != nil {
+		return err
+	} else if aclObj != nil && !aclObj.AllowNsOp(args.RequestNamespace(), acl.NamespaceCapabilityReadJob) {
+		return structs.ErrPermissionDenied
+	}
+
+	// Setup the blocking query
+	opts := blockingOptions{
+		queryOpts: &args.QueryOptions,
+		queryMeta: &reply.QueryMeta,
+		run: func(ws memdb.WatchSet, state *state.StateStore) error {
+			// Look for the job
+			out, err := state.JobSubmission(ws, args.RequestNamespace(), args.JobName, args.Version)
+			if err != nil {
+				netlog.Red("Job.GetJobSubmission", "from state error", err)
+				return err
+			}
+
+			// Setup the output
+			reply.Submission = out
+			if out != nil {
+				// associate with the index of the job this submission context originates from
+				reply.Index = out.JobIndex
+			} else {
+				// if there is no submission context, associate with no index
+				reply.Index = 0
+			}
+
+			// Set the query response
+			j.srv.setQueryMeta(&reply.QueryMeta)
+			return nil
+		}}
+	return j.srv.blockingRPC(&opts)
 }
 
 // GetJob is used to request information about a specific job
@@ -1754,13 +1807,13 @@ func (j *Job) Plan(args *structs.JobPlanRequest, reply *structs.JobPlanResponse)
 		if oldJob.SpecChanged(args.Job) {
 			// Insert the updated Job into the snapshot
 			updatedIndex = oldJob.JobModifyIndex + 1
-			if err := snap.UpsertJob(structs.IgnoreUnknownTypeFlag, updatedIndex, args.Job); err != nil {
+			if err := snap.UpsertJob(structs.IgnoreUnknownTypeFlag, updatedIndex, args.Submission, args.Job); err != nil {
 				return err
 			}
 		}
 	} else if oldJob == nil {
 		// Insert the updated Job into the snapshot
-		err := snap.UpsertJob(structs.IgnoreUnknownTypeFlag, 100, args.Job)
+		err := snap.UpsertJob(structs.IgnoreUnknownTypeFlag, 100, args.Submission, args.Job)
 		if err != nil {
 			return err
 		}

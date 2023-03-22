@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/cronexpr"
+	"github.com/shoenig/netlog"
+	"golang.org/x/exp/maps"
 )
 
 const (
@@ -68,6 +70,11 @@ type JobsParseRequest struct {
 	// HCLv1 indicates whether the JobHCL should be parsed with the hcl v1 parser
 	HCLv1 bool `json:"hclv1,omitempty"`
 
+	// Variables are HCL2 variables associated with the job. Only works with hcl2.
+	//
+	// Interpreted as if it were the content of a variables file.
+	Variables string
+
 	// Canonicalize is a flag as to if the server should return default values
 	// for unset fields
 	Canonicalize bool
@@ -78,7 +85,7 @@ func (c *Client) Jobs() *Jobs {
 	return &Jobs{client: c}
 }
 
-// ParseHCL is used to convert the HCL repesentation of a Job to JSON server side.
+// ParseHCL is used to convert the HCL representation of a Job to JSON server side.
 // To parse the HCL client side see package github.com/hashicorp/nomad/jobspec
 // Use ParseHCLOpts if you need to customize JobsParseRequest.
 func (j *Jobs) ParseHCL(jobHCL string, canonicalize bool) (*Job, error) {
@@ -89,10 +96,8 @@ func (j *Jobs) ParseHCL(jobHCL string, canonicalize bool) (*Job, error) {
 	return j.ParseHCLOpts(req)
 }
 
-// ParseHCLOpts is used to convert the HCL representation of a Job to JSON
-// server side. To parse the HCL client side see package
-// github.com/hashicorp/nomad/jobspec.
-// ParseHCL is an alternative convenience API for HCLv2 users.
+// ParseHCLOpts is used to request the server convert the HCL representation of a
+// Job to JSON on our behalf. Accepts HCL1 or HCL2 jobs as input.
 func (j *Jobs) ParseHCLOpts(req *JobsParseRequest) (*Job, error) {
 	var job Job
 	_, err := j.client.put("/v1/jobs/parse", req, &job, nil)
@@ -116,6 +121,7 @@ type RegisterOptions struct {
 	PolicyOverride bool
 	PreserveCounts bool
 	EvalPriority   int
+	Submission     *JobSubmission
 }
 
 // Register is used to register a new job. It returns the ID
@@ -134,9 +140,7 @@ func (j *Jobs) EnforceRegister(job *Job, modifyIndex uint64, q *WriteOptions) (*
 // returns the ID of the evaluation, along with any errors encountered.
 func (j *Jobs) RegisterOpts(job *Job, opts *RegisterOptions, q *WriteOptions) (*JobRegisterResponse, *WriteMeta, error) {
 	// Format the request
-	req := &JobRegisterRequest{
-		Job: job,
-	}
+	req := &JobRegisterRequest{Job: job}
 	if opts != nil {
 		if opts.EnforceIndex {
 			req.EnforceIndex = true
@@ -145,6 +149,7 @@ func (j *Jobs) RegisterOpts(job *Job, opts *RegisterOptions, q *WriteOptions) (*
 		req.PolicyOverride = opts.PolicyOverride
 		req.PreserveCounts = opts.PreserveCounts
 		req.EvalPriority = opts.EvalPriority
+		req.Submission = opts.Submission
 	}
 
 	var resp JobRegisterResponse
@@ -252,6 +257,21 @@ func (j *Jobs) Versions(jobID string, diffs bool, q *QueryOptions) ([]*Job, []*J
 	return resp.Versions, resp.Diffs, qm, nil
 }
 
+// Submission is used to retrieve the original submitted source of a job given its
+// unique ID and version number.
+func (j *Jobs) Submission(jobID string, version int, q *QueryOptions) (*JobSubmission, *QueryMeta, error) {
+	var sub JobSubmission
+	s := fmt.Sprintf("/v1/job/%s/submission?version=%d", url.PathEscape(jobID), version)
+	netlog.Yellow("Jobs", "Submission", "s", s)
+	qm, err := j.client.query(s, &sub, q)
+	if err != nil {
+		netlog.Red("api Submission", "error", err)
+		return nil, nil, err
+	}
+	netlog.Yellow("api Submission", "resp", sub)
+	return &sub, qm, nil
+}
+
 // Allocations is used to return the allocs for a given job ID.
 func (j *Jobs) Allocations(jobID string, allAllocs bool, q *QueryOptions) ([]*AllocationListStub, *QueryMeta, error) {
 	var resp []*AllocationListStub
@@ -320,6 +340,7 @@ func (j *Jobs) Evaluations(jobID string, q *QueryOptions) ([]*Evaluation, *Query
 // eventually GC'ed from the system. Most callers should not specify purge.
 func (j *Jobs) Deregister(jobID string, purge bool, q *WriteOptions) (string, *WriteMeta, error) {
 	var resp JobDeregisterResponse
+	netlog.Red("api Jobs.Deregister", "jobID", jobID, "purge", purge)
 	wm, err := j.client.delete(fmt.Sprintf("/v1/job/%v?purge=%t", url.PathEscape(jobID), purge), nil, &resp, q)
 	if err != nil {
 		return "", nil, err
@@ -863,6 +884,50 @@ type ParameterizedJobConfig struct {
 	MetaOptional []string `mapstructure:"meta_optional" hcl:"meta_optional,optional"`
 }
 
+// JobSubmission is used to hold information about the original content of a job
+// specification being submitted to Nomad.
+//
+// A JobSubmission may be nil, indicating no information is known about the job
+// submission.
+type JobSubmission struct {
+	// Source contains the original job definition (may be hcl1, hcl2, or json).
+	Source string
+
+	// Format indicates what the Source content was (hcl1, hcl2, or json).
+	Format string
+
+	// VariableFlags contains the CLI "-var" flag arguments as submitted with the
+	// job (hcl2 only).
+	VariableFlags map[string]string
+
+	// Variables contains the opaque variables configuration as coming from
+	// a var-file or the WebUI variables input (hcl2 only).
+	Variables string
+}
+
+func (js *JobSubmission) Canonicalize() {
+	if js == nil {
+		return
+	}
+
+	if len(js.VariableFlags) == 0 {
+		js.VariableFlags = nil
+	}
+}
+
+func (js *JobSubmission) Copy() *JobSubmission {
+	if js == nil {
+		return nil
+	}
+
+	return &JobSubmission{
+		Source:        js.Source,
+		Format:        js.Format,
+		VariableFlags: maps.Clone(js.VariableFlags),
+		Variables:     js.Variables,
+	}
+}
+
 // Job is used to serialize a job.
 type Job struct {
 	/* Fields parsed from HCL config */
@@ -1248,7 +1313,8 @@ type JobRevertRequest struct {
 
 // JobRegisterRequest is used to update a job
 type JobRegisterRequest struct {
-	Job *Job
+	Submission *JobSubmission
+	Job        *Job
 	// If EnforceIndex is set then the job will only be registered if the passed
 	// JobModifyIndex matches the current Jobs index. If the index is zero, the
 	// register only occurs if the job is new.
@@ -1383,6 +1449,12 @@ type JobDispatchResponse struct {
 type JobVersionsResponse struct {
 	Versions []*Job
 	Diffs    []*JobDiff
+	QueryMeta
+}
+
+// JobSubmissionResponse is used for a job get submission request
+type JobSubmissionResponse struct {
+	Submission *JobSubmission
 	QueryMeta
 }
 

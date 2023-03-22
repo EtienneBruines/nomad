@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/hashicorp/nomad/jobspec"
 	"github.com/hashicorp/nomad/jobspec2"
 	"github.com/hashicorp/nomad/nomad/structs"
+	"github.com/shoenig/netlog"
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
@@ -104,6 +106,9 @@ func (s *HTTPServer) JobSpecificRequest(resp http.ResponseWriter, req *http.Requ
 	case strings.HasSuffix(path, "/services"):
 		jobName := strings.TrimSuffix(path, "/services")
 		return s.jobServiceRegistrations(resp, req, jobName)
+	case strings.HasSuffix(path, "/submission"):
+		jobName := strings.TrimSuffix(path, "/submission")
+		return s.jobSubCRUD(resp, req, jobName)
 	default:
 		return s.jobCRUD(resp, req, path)
 	}
@@ -332,8 +337,53 @@ func (s *HTTPServer) jobLatestDeployment(resp http.ResponseWriter, req *http.Req
 	return out.Deployment, nil
 }
 
-func (s *HTTPServer) jobCRUD(resp http.ResponseWriter, req *http.Request,
-	jobName string) (interface{}, error) {
+func (s *HTTPServer) jobSubCRUD(resp http.ResponseWriter, req *http.Request, jobName string) (*structs.JobSubmission, error) {
+	version, err := strconv.ParseUint(req.URL.Query().Get("version"), 10, 64)
+	if err != nil {
+		return nil, CodedError(400, "Unable to parse job submission version parameter")
+	}
+	netlog.Cyan("HS.jobSubCRUD", "jobName", jobName, "version", version, "method", req.Method)
+	switch req.Method {
+	case "GET":
+		return s.jobSubQuery(resp, req, jobName, version)
+	default:
+		return nil, CodedError(405, ErrInvalidMethod)
+	}
+}
+
+func (s *HTTPServer) jobSubQuery(resp http.ResponseWriter, req *http.Request, jobName string, version uint64) (*structs.JobSubmission, error) {
+	netlog.Yellow("HS.jobSubQuery", "jobName", jobName, "version", version)
+
+	args := structs.JobSubmissionRequest{
+		JobName: jobName,
+		Version: version,
+	}
+
+	netlog.Yellow("A")
+
+	if s.parse(resp, req, &args.Region, &args.QueryOptions) {
+		netlog.Yellow("B")
+		return nil, nil
+	}
+
+	var out structs.JobSubmissionResponse
+	if err := s.agent.RPC("Job.GetJobSubmission", &args, &out); err != nil {
+		netlog.Yellow("C", "error", err)
+		return nil, err
+	}
+
+	setMeta(resp, &out.QueryMeta)
+	if out.Submission == nil {
+		netlog.Yellow("D")
+		return nil, CodedError(404, "job source not found")
+	}
+
+	netlog.Yellow("E", "out", fmt.Sprintf("%#v", out.Submission))
+	return out.Submission, nil
+}
+
+func (s *HTTPServer) jobCRUD(resp http.ResponseWriter, req *http.Request, jobName string) (interface{}, error) {
+	netlog.Purple("HS.jobCRUD", "jobName", jobName, "Method", req.Method)
 	switch req.Method {
 	case "GET":
 		return s.jobQuery(resp, req, jobName)
@@ -346,14 +396,17 @@ func (s *HTTPServer) jobCRUD(resp http.ResponseWriter, req *http.Request,
 	}
 }
 
-func (s *HTTPServer) jobQuery(resp http.ResponseWriter, req *http.Request,
-	jobName string) (interface{}, error) {
+func (s *HTTPServer) jobQuery(resp http.ResponseWriter, req *http.Request, jobName string) (*structs.Job, error) {
+
 	args := structs.JobSpecificRequest{
 		JobID: jobName,
 	}
 	if s.parse(resp, req, &args.Region, &args.QueryOptions) {
 		return nil, nil
 	}
+
+	// just get me a submission=true parameter?
+	// args.QueryOptions.
 
 	var out structs.SingleJobResponse
 	if err := s.agent.RPC("Job.GetJob", &args, &out); err != nil {
@@ -379,8 +432,7 @@ func (s *HTTPServer) jobQuery(resp http.ResponseWriter, req *http.Request,
 	return job, nil
 }
 
-func (s *HTTPServer) jobUpdate(resp http.ResponseWriter, req *http.Request,
-	jobName string) (interface{}, error) {
+func (s *HTTPServer) jobUpdate(resp http.ResponseWriter, req *http.Request, jobName string) (interface{}, error) {
 	var args api.JobRegisterRequest
 	if err := decodeBody(req, &args); err != nil {
 		return nil, CodedError(400, err.Error())
@@ -395,6 +447,8 @@ func (s *HTTPServer) jobUpdate(resp http.ResponseWriter, req *http.Request,
 	if jobName != "" && *args.Job.ID != jobName {
 		return nil, CodedError(400, "Job ID does not match name")
 	}
+
+	netlog.Cyan("H.jobUpdate", "sub:", args.Submission)
 
 	// GH-8481. Jobs of type system can only have a count of 1 and therefore do
 	// not support scaling. Even though this returns an error on the first
@@ -418,8 +472,13 @@ func (s *HTTPServer) jobUpdate(resp http.ResponseWriter, req *http.Request,
 	}
 
 	sJob, writeReq := s.apiJobAndRequestToStructs(args.Job, req, args.WriteRequest)
+	maxSubmissionSize := s.agent.Server().GetConfig().MaxJobSourceSize
+	submission := apiJobSubmissionToStructs(args.Submission, sJob.Meta, maxSubmissionSize)
+
 	regReq := structs.JobRegisterRequest{
-		Job:            sJob,
+		Job:        sJob,
+		Submission: submission,
+
 		EnforceIndex:   args.EnforceIndex,
 		JobModifyIndex: args.JobModifyIndex,
 		PolicyOverride: args.PolicyOverride,
@@ -715,6 +774,32 @@ func (s *HTTPServer) jobDispatchRequest(resp http.ResponseWriter, req *http.Requ
 	return out, nil
 }
 
+func writeVariablesFile(content string) (string, func(), error) {
+	// nothing to do if there is no variables content
+	if content == "" {
+		return "", func() {}, nil
+	}
+
+	// write variables content to a tmp file and return the filename and cleanup
+	// helper function for removing the tmp file
+	f, err := os.CreateTemp("", "hcl-") // uses 0600
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err = f.WriteString(content); err != nil {
+		return "", nil, err
+	}
+	if err = f.Sync(); err != nil {
+		return "", nil, err
+	}
+	if err = f.Close(); err != nil {
+		return "", nil, err
+	}
+	return f.Name(), func() {
+		_ = os.Remove(f.Name())
+	}, nil
+}
+
 // JobsParseRequest parses a hcl jobspec and returns a api.Job
 func (s *HTTPServer) JobsParseRequest(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
 	if req.Method != http.MethodPut && req.Method != http.MethodPost {
@@ -752,11 +837,22 @@ func (s *HTTPServer) JobsParseRequest(resp http.ResponseWriter, req *http.Reques
 	if args.HCLv1 {
 		jobStruct, err = jobspec.Parse(strings.NewReader(args.JobHCL))
 	} else {
+		varsFile, cleanupVarsFile, varsErr := writeVariablesFile(args.Variables)
+		if varsErr != nil {
+			return nil, CodedError(400, "Failed to write HCL variables file")
+		}
+		defer cleanupVarsFile()
+
+		netlog.Green("PARSE", "varsFile", varsFile, "chars", len(args.Variables))
 		jobStruct, err = jobspec2.ParseWithConfig(&jobspec2.ParseConfig{
-			Path:    "input.hcl",
-			Body:    []byte(args.JobHCL),
-			AllowFS: false,
+			Path:     "input.hcl",
+			Body:     []byte(args.JobHCL),
+			AllowFS:  false,
+			VarFiles: []string{varsFile},
 		})
+		if err != nil {
+			return nil, CodedError(400, fmt.Sprintf("failed to parse job: %v", err))
+		}
 	}
 	if err != nil {
 		return nil, CodedError(400, err.Error())
@@ -799,6 +895,34 @@ func (s *HTTPServer) jobServiceRegistrations(
 		return nil, CodedError(http.StatusNotFound, jobNotFoundErr)
 	}
 	return reply.Services, nil
+}
+
+func apiJobSubmissionToStructs(submission *api.JobSubmission, meta map[string]string, maxSize int) *structs.JobSubmission {
+	if submission == nil {
+		return nil
+	}
+
+	// discard the job if the submission is larger than the maximum size
+	totalSize := len(submission.Source)
+	totalSize += len(submission.Variables)
+	for key, value := range submission.VariableFlags {
+		totalSize += len(key)
+		totalSize += len(value)
+	}
+
+	netlog.Yellow("Convert", "max size", maxSize, "total size", totalSize)
+
+	if totalSize > maxSize {
+		netlog.Red("Convert", "exceeds max size", maxSize, "total size", totalSize)
+		return nil
+	}
+
+	return &structs.JobSubmission{
+		Source:        submission.Source,
+		Format:        submission.Format,
+		VariableFlags: submission.VariableFlags,
+		Variables:     submission.Variables,
+	}
 }
 
 // apiJobAndRequestToStructs parses the query params from the incoming
