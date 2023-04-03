@@ -4457,6 +4457,8 @@ func (j *Job) Canonicalize() {
 	if j.Periodic != nil {
 		j.Periodic.Canonicalize()
 	}
+
+	j.Update.Canonicalize()
 }
 
 // Copy returns a deep copy of the Job. It is expected that callers use recover.
@@ -5142,16 +5144,53 @@ func (u *UpdateStrategy) IsEmpty() bool {
 		return true
 	}
 
-	// The default UpdateStrategy sets the MaxParallel to 1, but leaves HealthCheck unchanged,
-	// by checking both values it is possible to determine if there is any user configuration
-	// or if the block can be considered empty
-	return u.MaxParallel == 1 && u.HealthCheck == ""
+	return *u == *DefaultUpdateStrategy
 }
 
 // Rolling returns if a rolling strategy should be used.
 // TODO(alexdadgar): Remove once no longer used by the scheduler.
 func (u *UpdateStrategy) Rolling() bool {
 	return u.Stagger > 0 && u.MaxParallel > 0
+}
+
+func (u *UpdateStrategy) Canonicalize() {
+	d := DefaultUpdateStrategy
+
+	if u.MaxParallel != 0 {
+		u.MaxParallel = d.MaxParallel
+	}
+
+	if u.Stagger == 0 {
+		u.Stagger = d.Stagger
+	}
+
+	if u.HealthCheck == "" {
+		u.HealthCheck = d.HealthCheck
+	}
+
+	if u.HealthyDeadline == 0 {
+		u.HealthyDeadline = d.HealthyDeadline
+	}
+
+	if u.ProgressDeadline == 0 {
+		u.ProgressDeadline = d.ProgressDeadline
+	}
+
+	if u.MinHealthyTime == 0 {
+		u.MinHealthyTime = d.MinHealthyTime
+	}
+
+	if u.AutoRevert == false {
+		u.AutoRevert = d.AutoRevert
+	}
+
+	if u.Canary == 0 {
+		u.Canary = d.Canary
+	}
+
+	if u.AutoPromote == false {
+		u.AutoPromote = d.AutoPromote
+	}
 }
 
 type Multiregion struct {
