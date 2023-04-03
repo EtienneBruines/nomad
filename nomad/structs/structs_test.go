@@ -22,81 +22,124 @@ import (
 func TestJob_Validate(t *testing.T) {
 	ci.Parallel(t)
 
-	j := &Job{}
-	err := j.Validate()
-	requireErrors(t, err,
-		"datacenters",
-		"job ID",
-		"job name",
-		"job region",
-		"job type",
-		"namespace",
-		"task groups",
-	)
-
-	j = &Job{
-		Type: "invalid-job-type",
-	}
-	err = j.Validate()
-	if expected := `Invalid job type: "invalid-job-type"`; !strings.Contains(err.Error(), expected) {
-		t.Errorf("expected %s but found: %v", expected, err)
-	}
-
-	j = &Job{
-		Type: JobTypeService,
-		Periodic: &PeriodicConfig{
-			Enabled: true,
-		},
-	}
-	err = j.Validate()
-	require.Error(t, err, "Periodic")
-
-	j = &Job{
-		Region:      "global",
-		ID:          uuid.Generate(),
-		Namespace:   "test",
-		Name:        "my-job",
-		Type:        JobTypeService,
-		Priority:    JobDefaultPriority,
-		Datacenters: []string{"*"},
-		TaskGroups: []*TaskGroup{
-			{
-				Name: "web",
-				RestartPolicy: &RestartPolicy{
-					Interval: 5 * time.Minute,
-					Delay:    10 * time.Second,
-					Attempts: 10,
-				},
-			},
-			{
-				Name: "web",
-				RestartPolicy: &RestartPolicy{
-					Interval: 5 * time.Minute,
-					Delay:    10 * time.Second,
-					Attempts: 10,
-				},
-			},
-			{
-				RestartPolicy: &RestartPolicy{
-					Interval: 5 * time.Minute,
-					Delay:    10 * time.Second,
-					Attempts: 10,
-				},
+	tests := []struct {
+		name   string
+		job    *Job
+		expErr []string
+	}{
+		{
+			name: "job is empty",
+			job:  &Job{},
+			expErr: []string{
+				"datacenters",
+				"job ID",
+				"job name",
+				"job region",
+				"job type",
+				"namespace",
+				"task groups",
 			},
 		},
+		{
+			name: "job type is invalid",
+			job: &Job{
+				Type: "invalid-job-type",
+			},
+			expErr: []string{
+				`Invalid job type: "invalid-job-type"`,
+			},
+		},
+		{
+			name: "job periodic specification type is missing",
+			job: &Job{
+				Type: JobTypeService,
+				Periodic: &PeriodicConfig{
+					Enabled: true,
+				},
+			},
+			expErr: []string{
+				`Unknown periodic specification type ""`,
+				"Must specify a spec",
+			},
+		},
+		{
+			name: "job datacenters is empty",
+			job: &Job{
+				Datacenters: []string{""},
+			},
+			expErr: []string{
+				"datacenter must be non-empty string",
+			},
+		},
+		{
+			name: "job update strategy is invalid",
+			job: &Job{
+				Update: UpdateStrategy{
+					HealthCheck:      "foo",
+					HealthyDeadline:  10,
+					ProgressDeadline: 5,
+					MaxParallel:      2,
+				},
+			},
+			expErr: []string{
+				"Invalid health check given",
+				"Healthy deadline must be less than progress deadline",
+			},
+		},
+		{
+			name: "job task group is type invalid",
+			job: &Job{
+				Region:      "global",
+				ID:          uuid.Generate(),
+				Namespace:   "test",
+				Name:        "my-job",
+				Type:        JobTypeService,
+				Priority:    JobDefaultPriority,
+				Datacenters: []string{"*"},
+				TaskGroups: []*TaskGroup{
+					{
+						Name: "web",
+						RestartPolicy: &RestartPolicy{
+							Interval: 5 * time.Minute,
+							Delay:    10 * time.Second,
+							Attempts: 10,
+						},
+					},
+					{
+						Name: "web",
+						RestartPolicy: &RestartPolicy{
+							Interval: 5 * time.Minute,
+							Delay:    10 * time.Second,
+							Attempts: 10,
+						},
+					},
+					{
+						RestartPolicy: &RestartPolicy{
+							Interval: 5 * time.Minute,
+							Delay:    10 * time.Second,
+							Attempts: 10,
+						},
+					},
+				},
+			},
+			expErr: []string{
+				"2 redefines 'web' from group 1",
+				"group 3 missing name",
+				"Task group web validation failed",
+				"Missing tasks for task group",
+				"Unsupported restart mode",
+				"Task Group web should have a reschedule policy",
+				"Task Group web should have an ephemeral disk object",
+			},
+		},
 	}
-	err = j.Validate()
-	requireErrors(t, err,
-		"2 redefines 'web' from group 1",
-		"group 3 missing name",
-		"Task group web validation failed",
-	)
-	// test for invalid datacenters
-	j = &Job{
-		Datacenters: []string{""},
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.job.Validate()
+			requireErrors(t, err, tc.expErr...)
+		})
 	}
-	err = j.Validate()
-	require.Error(t, err, "datacenter must be non-empty string")
+
 }
 
 func TestJob_ValidateScaling(t *testing.T) {

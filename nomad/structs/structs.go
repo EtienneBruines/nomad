@@ -4629,6 +4629,12 @@ func (j *Job) Validate() error {
 		}
 	}
 
+	if !j.Update.IsEmpty() {
+		if err := j.Update.Validate(); err != nil {
+			mErr.Errors = append(mErr.Errors, err)
+		}
+	}
+
 	return mErr.ErrorOrNil()
 }
 
