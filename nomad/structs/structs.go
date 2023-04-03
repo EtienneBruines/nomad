@@ -5156,7 +5156,7 @@ func (u *UpdateStrategy) Rolling() bool {
 func (u *UpdateStrategy) Canonicalize() {
 	d := DefaultUpdateStrategy
 
-	if u.MaxParallel != 0 {
+	if u.MaxParallel == 0 {
 		u.MaxParallel = d.MaxParallel
 	}
 
@@ -5180,16 +5180,8 @@ func (u *UpdateStrategy) Canonicalize() {
 		u.MinHealthyTime = d.MinHealthyTime
 	}
 
-	if u.AutoRevert == false {
-		u.AutoRevert = d.AutoRevert
-	}
-
 	if u.Canary == 0 {
 		u.Canary = d.Canary
-	}
-
-	if u.AutoPromote == false {
-		u.AutoPromote = d.AutoPromote
 	}
 }
 
