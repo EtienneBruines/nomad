@@ -5142,7 +5142,10 @@ func (u *UpdateStrategy) IsEmpty() bool {
 		return true
 	}
 
-	return u.MaxParallel == 0
+	// The default UpdateStrategy sets the MaxParallel to 1, but leaves HealthCheck unchanged,
+	// by checking both values it is possible to determine if there is any user configuration
+	// or if the block can be considered empty
+	return u.MaxParallel == 1 && u.HealthCheck == ""
 }
 
 // Rolling returns if a rolling strategy should be used.
