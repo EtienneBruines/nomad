@@ -573,15 +573,15 @@ func convertServerConfig(agentConfig *Config) (*nomad.Config, error) {
 		conf.RaftBoltNoFreelistSync = bolt.NoFreelistSync
 	}
 
-	// Interpret max_job_source_size as bytes from string value
-	if agentConfig.Server.MaxJobSourceSize == nil {
-		agentConfig.Server.MaxJobSourceSize = pointer.Of("1m")
+	// Interpret job_max_source_size as bytes from string value
+	if agentConfig.Server.JobMaxSourceSize == nil {
+		agentConfig.Server.JobMaxSourceSize = pointer.Of("1M")
 	}
-	maxJobSourceBytes, err := humanize.ParseBytes(*agentConfig.Server.MaxJobSourceSize)
+	jobMaxSourceBytes, err := humanize.ParseBytes(*agentConfig.Server.JobMaxSourceSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse max job source bytes: %w", err)
 	}
-	conf.MaxJobSourceSize = int(maxJobSourceBytes)
+	conf.JobMaxSourceSize = int(jobMaxSourceBytes)
 
 	return conf, nil
 }

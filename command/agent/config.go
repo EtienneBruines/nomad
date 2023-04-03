@@ -606,10 +606,10 @@ type ServerConfig struct {
 	// for the EventBufferSize is 1.
 	EventBufferSize *int `hcl:"event_buffer_size"`
 
-	// MaxJobSourceSize limits the maximum size of a jobs source hcl/json
+	// JobMaxSourceSize limits the maximum size of a jobs source hcl/json
 	// before being discarded automatically. If unset, the maximum size defaults
 	// to 1 MiB. If the value is zero, no job sources will be stored.
-	MaxJobSourceSize *string `hcl:"max_job_source_size"`
+	JobMaxSourceSize *string `hcl:"max_job_source_size"`
 
 	// LicensePath is the path to search for an enterprise license.
 	LicensePath string `hcl:"license_path"`
@@ -677,7 +677,7 @@ func (s *ServerConfig) Copy() *ServerConfig {
 	ns.PlanRejectionTracker = s.PlanRejectionTracker.Copy()
 	ns.EnableEventBroker = pointer.Copy(s.EnableEventBroker)
 	ns.EventBufferSize = pointer.Copy(s.EventBufferSize)
-	ns.MaxJobSourceSize = pointer.Copy(s.MaxJobSourceSize)
+	ns.JobMaxSourceSize = pointer.Copy(s.JobMaxSourceSize)
 	ns.licenseAdditionalPublicKeys = slices.Clone(s.licenseAdditionalPublicKeys)
 	ns.ExtraKeysHCL = slices.Clone(s.ExtraKeysHCL)
 	ns.Search = s.Search.Copy()
@@ -1981,7 +1981,7 @@ func (s *ServerConfig) Merge(b *ServerConfig) *ServerConfig {
 		result.EventBufferSize = b.EventBufferSize
 	}
 
-	result.MaxJobSourceSize = pointer.Merge(s.MaxJobSourceSize, b.MaxJobSourceSize)
+	result.JobMaxSourceSize = pointer.Merge(s.JobMaxSourceSize, b.JobMaxSourceSize)
 
 	if b.PlanRejectionTracker != nil {
 		result.PlanRejectionTracker = result.PlanRejectionTracker.Merge(b.PlanRejectionTracker)

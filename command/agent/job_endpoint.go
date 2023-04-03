@@ -472,7 +472,7 @@ func (s *HTTPServer) jobUpdate(resp http.ResponseWriter, req *http.Request, jobN
 	}
 
 	sJob, writeReq := s.apiJobAndRequestToStructs(args.Job, req, args.WriteRequest)
-	maxSubmissionSize := s.agent.Server().GetConfig().MaxJobSourceSize
+	maxSubmissionSize := s.agent.Server().GetConfig().JobMaxSourceSize
 	submission := apiJobSubmissionToStructs(args.Submission, sJob.Meta, maxSubmissionSize)
 
 	regReq := structs.JobRegisterRequest{
